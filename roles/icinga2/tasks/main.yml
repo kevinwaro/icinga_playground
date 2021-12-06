@@ -1,0 +1,162 @@
+---
+- name: Install gnupg2
+  apt: name=gnupg2 update_cache=yes state=present
+
+- name: Install Mariadb packages
+  apt: name={{ item }} update_cache=yes
+  with_items:
+      - python3-pymysql
+      - mariadb-server
+      - mariadb-client
+
+- name: Add icinga personal repository's signing key
+  apt_key:
+      url: http://packages.icinga.com/icinga.key
+      state: present
+
+- name: Add icinga personal repository
+  apt_repository:
+      repo: "deb http://packages.icinga.com/debian icinga-{{ ansible_distribution_release }} main"
+      state: present
+
+- name: Install icinga2 packages
+  apt: name={{ item }} update_cache=yes
+  with_items:
+      - icinga2
+      - icingacli
+      - icingaweb2
+      - monitoring-plugins
+      - nagios-nrpe-plugin
+      - icinga2-ido-mysql
+
+- name: Update default DocumentRoot in Apache2 Virtualhost
+  lineinfile:
+      path: /etc/apache2/sites-enabled/000-default.conf
+      regexp: '^.*DocumentRoot'
+      line: '    DocumentRoot /usr/share/icingaweb2/public'
+  notify: Restart Apache2
+
+- name: Enable ido-mysql for icingaweb2
+  command: "icinga2 feature enable ido-mysql"
+  notify: Restart Icinga2
+
+- name: Create authentication.ini
+  blockinfile:
+      path: /etc/icingaweb2/authentication.ini
+      create: yes
+      owner: root
+      group: icingaweb2
+      mode: 0644
+      block: |
+          [icingaweb2]
+          backend             = "db"
+          resource            = "icingaweb2"
+
+- name: Create config.ini
+  blockinfile:
+      path: /etc/icingaweb2/config.ini
+      create: yes
+      owner: root
+      group: icingaweb2
+      mode: 0644
+      block: |
+          [preferences]
+          type                = "db"
+          resource            = "icingaweb2"
+
+- name: Create groups.ini
+  blockinfile:
+      path: /etc/icingaweb2/groups.ini
+      create: yes
+      owner: root
+      group: icingaweb2
+      mode: 0644
+      block: |
+          [icingaweb2]
+          backend                = "db"
+          resource               = "icingaweb2_db"
+
+- name: Register icinga2 mysql user
+  shell: grep 'user' /etc/icinga2/features-enabled/ido-mysql.conf | tr -d ',' | tr -d '\"' | awk '{ print $NF }'
+  register: icinga2_user
+
+- name: Register icinga2 mysql password
+  shell: grep 'password' /etc/icinga2/features-enabled/ido-mysql.conf | tr -d ',' | tr -d '\"' | awk '{ print $NF }'
+  register: icinga2_password
+
+- name: Register icinga2 mysql database
+  shell: grep 'database' /etc/icinga2/features-enabled/ido-mysql.conf | tr -d ',' | tr -d '\"' | awk '{ print $NF }'
+  register: icinga2_db
+
+- name: Update ini file
+  template:
+      src: "{{ item }}.j2"
+      dest: "/etc/icingaweb2/{{ item }}"
+  with_items:
+      - resources.ini
+      - roles.ini
+
+- name: Enable monitoring module for icingaweb2
+  command: "icingacli module enable monitoring"
+  notify: Restart Icinga2
+
+- name: Create monitoring folder
+  file:
+      path: /etc/icingaweb2/modules/monitoring
+      owner: root
+      group: root
+      state: directory
+
+- name: Create config.ini
+  blockinfile:
+      path: /etc/icingaweb2/modules/monitoring/config.ini
+      create: yes
+      owner: root
+      group: icingaweb2
+      mode: 0644
+      block: |
+          [security]
+          protected_customvars = "*pw*,*pass*,community"
+
+- name: Create backends.ini
+  blockinfile:
+      path: /etc/icingaweb2/modules/monitoring/backends.ini
+      create: yes
+      owner: root
+      group: icingaweb2
+      mode: 0644
+      block: |
+          [icinga2]
+          type                = "ido"
+          resource            = "icinga2"
+
+- name: Create commandtransports.ini
+  blockinfile:
+      path: /etc/icingaweb2/modules/monitoring/commandtransports.ini
+      create: yes
+      owner: root
+      group: icingaweb2
+      mode: 0644
+      block: |
+          [icinga2]
+          transport = "api"
+          host = "localhost"
+          port = "5665"
+          username = "api"
+          password = "api"
+
+- name: Create a new database with name icingawebdb
+  command: "mysql -u root -e \"create database {{ icingaweb2_db }};\""
+
+- name: Create icingaweb2 user for MySQL
+  command: "mysql -u root -e \"GRANT ALL ON {{ icingaweb2_db }}.* TO {{ icingaweb2_user }}@localhost IDENTIFIED BY '{{ icingaweb2_password }}';\""
+
+- name: Import icingaweb2 schema
+  shell: "mysql -u root {{ icingaweb2_db }} < /usr/share/icingaweb2/etc/schema/mysql.schema.sql"
+
+- name: Generate password hash
+  shell: "php -r 'echo password_hash(\"{{ icingaweb2_admin_password }}\", PASSWORD_DEFAULT);'"
+  register: admin_password_hash
+
+- name: Setup manually Icinga Admin account
+  command: "mysql -u root -e \"use {{ icingaweb2_db }}; INSERT INTO icingaweb_user (name, active, password_hash) VALUES ('icingaadmin', 1, '{{ admin_password_hash.stdout}}');\""

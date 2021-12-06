@@ -1,0 +1,6 @@
+---
+- name: Restart Apache2
+  service: name=apache2 state=restarted
+
+- name: Restart Icinga2
+  service: name=icinga2 state=restarted
